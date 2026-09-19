@@ -25,7 +25,7 @@ PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = OpenAI(
     api_key=PROXYAPI_KEY,
-    base_url="https://api.proxyapi.ru/openai/v1"
+    base_url="https://api.proxyapi.ru/v1"
 )
 
 @bot.message_handler(commands=['start'])
@@ -44,7 +44,6 @@ def handle_message(message):
         )
         bot.reply_to(message, response.choices[0].message.content)
     except Exception as e:
-        print(f"Ошибка: {e}")
         bot.reply_to(message, f"Ошибка: {e}")
 
 if __name__ == "__main__":

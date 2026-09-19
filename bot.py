@@ -36,7 +36,7 @@ def start(message):
 def handle_message(message):
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "Ты вежливый помощник. Отвечай кратко и понятно на русском языке."},
                 {"role": "user", "content": message.text}
@@ -44,7 +44,8 @@ def handle_message(message):
         )
         bot.reply_to(message, response.choices[0].message.content)
     except Exception as e:
-        bot.reply_to(message, "Ошибка при запросе к нейросети.")
+        print(f"Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
 if __name__ == "__main__":
     bot.infinity_polling()

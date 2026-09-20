@@ -1,11 +1,12 @@
 import os
+import sqlite3
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 from openai import OpenAI
 
-# --- 1. ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ СТАТУСА НА RENDER ---
+# --- 1. ВЕБ-СЕРВЕР ДЛЯ СТАТУСА LIVE НА RENDER ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -21,7 +22,7 @@ def serve():
 
 threading.Thread(target=serve, daemon=True).start()
 
-# --- 2. ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ ---
+# --- 2. НАСТРОЙКИ И КЛЮЧИ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 
@@ -31,172 +32,151 @@ client = OpenAI(
     base_url="https://api.proxyapi.ru/v1"
 )
 
-# Простейшее хранилище лимитов пользователей в памяти (user_id: количество генераций)
-# Каждому новому пользователю даем 2 бесплатные генерации
-user_balance = {}
-user_state = {}
+# --- 3. РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
+def init_db():
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            credits INTEGER DEFAULT 2
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-FREE_LIMIT = 2
-PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звезд Telegram
-PACKAGE_CREDITS = 20      # Количество генераций в пакете
+init_db()
 
-def get_credits(user_id):
-    if user_id not in user_balance:
-        user_balance[user_id] = FREE_LIMIT
-    return user_balance[user_id]
+def get_user_credits(user_id, username=""):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT credits FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if row is None:
+        safe_username = username if username else "no_username"
+        cursor.execute("INSERT INTO users (user_id, username, credits) VALUES (?, ?, 2)", (user_id, safe_username))
+        conn.commit()
+        credits = 2
+    else:
+        credits = row[0]
+    conn.close()
+    return credits
 
-# --- 3. КЛАВИАТУРЫ И МЕНЮ ---
+def update_credits(user_id, count):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (count, user_id))
+    conn.commit()
+    conn.close()
+
+# --- 4. МЕНЮ И КНОПКИ ---
 def get_main_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    credits_left = get_credits(user_id)
+    credits_left = get_user_credits(user_id)
     
     btn1 = types.InlineKeyboardButton("🔥 Факты / Топы", callback_data="genre_facts")
     btn2 = types.InlineKeyboardButton("💡 Экспертный / Польза", callback_data="genre_expert")
     btn3 = types.InlineKeyboardButton("😱 Мистика / Истории", callback_data="genre_story")
     btn4 = types.InlineKeyboardButton("💰 Деньги / Бизнес", callback_data="genre_business")
     btn_buy = types.InlineKeyboardButton(f"⭐ Купить 20 генераций (Баланс: {credits_left})", callback_data="buy_credits")
+    # Рабочая ссылка (замените на свою оферту на telegra.ph)
+    btn_rules = types.InlineKeyboardButton("📄 Правила использования", url="https://telegra.ph")
     
     markup.add(btn1, btn2)
     markup.add(btn3, btn4)
     markup.add(btn_buy)
+    markup.add(btn_rules)
     return markup
 
-# --- 4. ОБРАБОТЧИКИ КОМАНД ---
+# --- 5. ОБРАБОТКА КОМАНДЫ /START ---
 @bot.message_handler(commands=['start'])
 def handle_start(message):
-    user_id = message.from_user.id
-    credits_left = get_credits(user_id)
-    welcome_text = (
-        f"👋 **Привет, {message.from_user.first_name}!**\n\n"
-        "Я — ИИ-генератор сценариев и визуальных концепций для **Shorts, Reels и TikTok**.\n\n"
-        "Я умею:\n"
-        "• Придумывать вирусные крючки (хуки) первых 3 секунд;\n"
-        "• Писать сценарии с высоким удержанием;\n"
-        "• Составлять промпты для генерации кадров в Midjourney/FLUX;\n"
-        "• Подбирать хэштеги под тренды.\n\n"
-        f"🎁 Твой доступный баланс: **{credits_left} генераций**.\n\n"
-        "Выбери категорию ролика ниже:"
-    )
-    bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+    try:
+        user_id = message.from_user.id
+        # Очищаем имя от спецсимволов для безопасности
+        first_name = message.from_user.first_name.replace("_", " ").replace("*", "")
+        username = message.from_user.username or ""
+        
+        credits_left = get_user_credits(user_id, username)
+        
+        welcome_text = (
+            f"👋 **Привет, {first_name}!**\n\n"
+            "Я — твой ИИ-продюсер вирусных роликов для **Shorts, Reels и TikTok**.\n\n"
+            f"🎁 Твой баланс: **{credits_left} генерации**.\n\n"
+            "Выбери категорию ролика ниже:"
+        )
+        bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+    except Exception as e:
+        print(f"Ошибка в start: {e}")
 
-# --- 5. ОБРАБОТКА НАЖАТИЙ КНОПОК ---
+# --- 6. ОБРАБОТКА КНОПОК И ОПЛАТЫ ЗВЕЗДАМИ ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     user_id = call.from_user.id
     
     if call.data.startswith("genre_"):
-        genre = call.data.replace("genre_", "")
-        user_state[user_id] = {"stage": "waiting_theme", "genre": genre}
-        
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="✍️ **Напиши тему для ролика одним сообщением.**\n\n"
-                 "Например: *«3 вещи, которые убивают молодость»* или *«Неожиданный факт про глубины океана»*.",
-            parse_mode="Markdown"
-        )
+        bot.send_message(call.message.chat.id, "✍️ **Напиши тему для ролика одним сообщением.**", parse_mode="Markdown")
     
     elif call.data == "buy_credits":
-        # Формирование инвойса на оплату звездами (Telegram Stars)
-        prices = [types.LabeledPrice(label="20 генераций Shorts", amount=PACKAGE_PRICE_STARS)]
+        prices = [types.LabeledPrice(label="20 сценариев для Reels/Shorts", amount=50)]
         bot.send_invoice(
             chat_id=call.message.chat.id,
-            title="Пакет: 20 сценариев для Shorts/Reels",
-            description="Пополнение баланса на 20 полных сценариев с промптами для визуализаций и хэштегами.",
-            invoice_payload="credits_pack_20",
-            provider_token="",  # Для Telegram Stars оставляется пустым!
-            currency="XTR",     # XTR — официальный код Telegram Stars
+            title="Пакет: 20 сценариев Shorts/Reels",
+            description="Пополнение баланса на 20 сценариев с промптами для FLUX и тегами.",
+            invoice_payload="credits_pack_20_stars",
+            provider_token="",  # Для Звёзд оставляем пустым!
+            currency="XTR",     # Telegram Stars
             prices=prices,
-            start_parameter="buy-shorts-pack"
+            start_parameter="buy-shorts-stars"
         )
 
-# --- 6. ОБРАБОТКА ОПЛАТЫ ЗВЕЗДАМИ ---
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def process_pre_checkout_query(pre_checkout_query):
-    # Подтверждаем готовность принять платёж
     bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @bot.message_handler(content_types=['successful_payment'])
 def process_successful_payment(message):
     user_id = message.from_user.id
-    # Начисляем пакет генераций
-    current = get_credits(user_id)
-    user_balance[user_id] = current + PACKAGE_CREDITS
+    update_credits(user_id, 20)
     
     bot.send_message(
         message.chat.id,
-        f"🎉 **Оплата успешно завершена!**\n\nВам начислено +{PACKAGE_CREDITS} генераций.\n"
-        f"Текущий баланс: **{user_balance[user_id]} генераций**.",
+        "🎉 **Оплата 50 звёзд успешно прошла!**\n\nВам начислено +20 генераций.",
         reply_markup=get_main_keyboard(user_id),
         parse_mode="Markdown"
     )
 
-# --- 7. ГЕНЕРАЦИЯ СЦЕНАРИЯ ЧЕРЕЗ OPENAI ---
+# --- 7. ГЕНЕРАЦИЯ СЦЕНАРИЯ ---
 @bot.message_handler(func=lambda message: True)
 def handle_user_text(message):
     user_id = message.from_user.id
-    current_credits = get_credits(user_id)
+    credits_left = get_user_credits(user_id)
     
-    if current_credits <= 0:
-        bot.reply_to(
-            message,
-            "⛔ **У вас закончились бесплатные генерации.**\n\n"
-            "Пополните баланс звездами Telegram, чтобы продолжить создавать вирусный контент.",
-            reply_markup=get_main_keyboard(user_id),
-            parse_mode="Markdown"
-        )
+    if credits_left <= 0:
+        bot.reply_to(message, "⛔ **Баланс исчерпан.** Пополните баланс кнопкой ниже.", reply_markup=get_main_keyboard(user_id))
         return
     
-    state = user_state.get(user_id, {})
-    genre = state.get("genre", "произвольный")
-    theme = message.text
-    
-    status_msg = bot.reply_to(message, "⏳ *ИИ анализирует тренды и генерирует ролик... Подождите 10-15 секунд.*", parse_mode="Markdown")
-    
-    system_prompt = (
-        "Ты — профессиональный продюсер вирусных коротких видео (YouTube Shorts, Instagram Reels, TikTok). "
-        "Твоя цель — создать сценарий с максимальным удержанием аудитории. "
-        "Структура ответа строго следующая:\n"
-        "1. 🎯 ВИРУСНЫЙ ХУК (первые 3 секунды: визуальный и текстовый триггер, интрига).\n"
-        "2. 📜 СЦЕНАРИЙ (до 45 секунд, разбит по секундам: [0-5 сек], [5-15 сек] и т.д. Текст для диктора простой, динамичный).\n"
-        "3. 🎨 ВИЗУАЛЬНЫЙ РЯД (покадровое описание видеоряда + точный промпт на английском для генерации картинки к каждой ключевой сцене в Midjourney/FLUX).\n"
-        "4. 🎵 РЕКОМЕНДАЦИЯ ПО МУЗЫКЕ (темп, настроение, тип трека).\n"
-        "5. 🏷 ХЭШТЕГИ (5-7 трендовых тегов)."
-    )
-    
-    user_prompt = f"Формат/Жанр: {genre}. Тема ролика: {theme}."
+    status_msg = bot.reply_to(message, "⏳ *ИИ анализирует тренды и пишет сценарий...*", parse_mode="Markdown")
     
     try:
         response = client.chat.completions.create(
             model="openai/gpt-4o-mini",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.7
+                {"role": "system", "content": "Ты продюсер вирусных Shorts/Reels. Напиши хук, сценарий по секундам и промпты для картинки."},
+                {"role": "user", "content": message.text}
+            ]
         )
         
-        # Списываем 1 генерацию
-        user_balance[user_id] = current_credits - 1
+        update_credits(user_id, -1)
         result_text = response.choices[0].message.content
         
         bot.delete_message(message.chat.id, status_msg.message_id)
         bot.send_message(message.chat.id, result_text)
-        
-        # Напоминаем про баланс и меню
-        bot.send_message(
-            message.chat.id,
-            f"✅ Готово! Списано: 1 генерация. Осталось на балансе: **{user_balance[user_id]}**.",
-            reply_markup=get_main_keyboard(user_id),
-            parse_mode="Markdown"
-        )
-        
-        # Сбрасываем стейт ожидания
-        user_state[user_id] = {}
+        bot.send_message(message.chat.id, f"✅ Списана 1 генерация. Осталось: **{credits_left - 1}**.", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
         
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка генерации: {e}", message.chat.id, status_msg.message_id)
 
-# --- 8. ЗАПУСК БОТА ---
 if __name__ == "__main__":
     bot.infinity_polling()

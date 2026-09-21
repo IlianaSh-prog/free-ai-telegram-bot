@@ -1,4 +1,3 @@
-
 import os
 import time
 import sqlite3
@@ -37,7 +36,7 @@ PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 CREATOMATE_TEMPLATE_ID = os.environ.get("CREATOMATE_TEMPLATE_ID")
 
-ADMIN_IDS = [123456789, 987654321]  # Ваши Telegram ID
+ADMIN_IDS = [8725167633, 1368485826]  # Ваши Telegram ID
 
 PACKAGE_PRICE_STARS = 50
 PACKAGE_CREDITS = 20

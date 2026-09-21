@@ -19,7 +19,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
-    def log_message(self, *args): return
+
+    def log_message(self, *args):
+        return
 
 def run_webserver():
     port = int(os.environ.get("PORT", 10000))
@@ -39,10 +41,10 @@ CREATOMATE_TEMPLATE_ID = os.environ.get("CREATOMATE_TEMPLATE_ID")
 # ⚠️ ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID И ID ВЛАДЕЛЬЦА (узнать в @userinfobot)
 ADMIN_IDS = [8725167633, 1368485826]
 
-PACKAGE_PRICE_STARS = 50  # Цена пакета: 50 звёзд
+PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
 PACKAGE_CREDITS = 20      # Генераций в пакете
 
-MAX_PHOTOS = 5  # Ограничение: максимум 5 фото на 1 видео
+MAX_PHOTOS = 5  # Максимум фото на одно видео
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = OpenAI(
@@ -58,7 +60,7 @@ user_state = {}
 # =====================================================================
 def get_db_connection():
     conn = sqlite3.connect("bot_database.db", timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL;")  # Быстрый режим параллельной записи
+    conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
 def init_db():
@@ -164,13 +166,12 @@ def handle_start(message):
     text = (
         f"👋 **Привет, {name}!**\n\n"
         "Я — твой ИИ-продюсер и видеомонтажёр для **Shorts, Reels и TikTok**.\n\n"
-        "• 🎬 **Монтаж видео:** пришли от 1 до 5 фото (или с текстом в подписи)!\n"
-        "• ✍️ **Сценарий ИИ:** выбери тематику в меню ниже.\n\n"
+        "• 🎬 **Монтаж видео:** пришлите от 1 до 5 фото (или с текстом в подписи)!\n"
+        "• ✍️ **Сценарий ИИ:** выберите тематику в меню ниже.\n\n"
         f"🎁 Твой баланс: **{credits_left} генераций**."
     )
     bot.send_message(message.chat.id, text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
 
-# 📊 Команда /stats — Финансовый отчёт (только для админов)
 @bot.message_handler(commands=['stats', 'admin'])
 def handle_admin_stats(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -198,7 +199,6 @@ def handle_admin_stats(message):
     )
     bot.send_message(message.chat.id, stats_text, parse_mode="Markdown")
 
-# ➕ Команда /add — Добавление попыток (только для админов)
 @bot.message_handler(commands=['add'])
 def handle_add_credits(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -225,23 +225,19 @@ def handle_incoming_photos(message):
         bot.reply_to(message, "⛔ У вас закончились генерации. Пополните баланс.", reply_markup=get_main_keyboard(user_id))
         return
         
-    # Инициализация хранилища пользователя
     if user_id not in user_media_data:
         user_media_data[user_id] = {"photos": [], "caption": None}
         
-    # Ссылка на загруженное фото
     file_info = bot.get_file(message.photo[-1].file_id)
     photo_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
     
-    # Защита от превышения лимита в 5 фото
     if len(user_media_data[user_id]["photos"]) >= MAX_PHOTOS:
-        bot.reply_to(message, f"⚠️ Достигнут лимит: **максимум {MAX_PHOTOS} фото** на один ролик! Напишите текст диктора или слово **Готово**.", parse_mode="Markdown")
+        bot.reply_to(message, f"⚠️ Максимум {MAX_PHOTOS} фото! Напишите текст или слово **Готово**.", parse_mode="Markdown")
         return
         
     user_media_data[user_id]["photos"].append(photo_url)
     current_count = len(user_media_data[user_id]["photos"])
     
-    # Запоминаем текст из подписи под фото, если он есть
     if message.caption:
         user_media_data[user_id]["caption"] = message.caption
         
@@ -262,7 +258,7 @@ def handle_incoming_photos(message):
         )
 
 # =====================================================================
-# 8. ФУНКЦИЯ СБОРКИ ВИДЕО В CREATOMATE
+# 8. ФУНКЦИЯ СБОРКИ СЛАЙДШОУ В CREATOMATE
 # =====================================================================
 def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
     voice_filename = f"voice_{user_id}_{int(time.time())}.mp3"
@@ -272,21 +268,41 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
         # 1. Синтез дикторской речи
         asyncio.run(generate_voice_file(text_script, voice_filename))
         
-        # 2. Формирование модификаций для Creatomate
-        modifications = {}
-        
-        # Подставляем фото в слои (Image-1, Image-2 и т.д.)
-        for idx, photo_url in enumerate(photos_list[:MAX_PHOTOS], start=1):
-            modifications[f"Image-{idx}.source"] = photo_url
-            
         headers = {
             "Authorization": f"Bearer {CREATOMATE_API_KEY}",
             "Content-Type": "application/json"
         }
         
+        # 2. Формируем покадровые слайды (по 3.5 секунды на каждый)
+        duration_per_slide = 3.5
+        elements = []
+        for idx, photo_url in enumerate(photos_list[:MAX_PHOTOS]):
+            elements.append({
+                "type": "image",
+                "track": 1,
+                "time": idx * duration_per_slide,
+                "duration": duration_per_slide,
+                "source": photo_url,
+                "animations": [
+                    {
+                        "time": "start",
+                        "duration": duration_per_slide,
+                        "transition": True,
+                        "type": "scale",
+                        "scope": "element",
+                        "start_scale": "100%",
+                        "end_scale": "115%",
+                        "easing": "linear"
+                    }
+                ]
+            })
+            
         payload = {
-            "template_id": CREATOMATE_TEMPLATE_ID,
-            "modifications": modifications
+            "output_format": "mp4",
+            "width": 1080,
+            "height": 1920,
+            "frame_rate": 30,
+            "elements": elements
         }
         
         resp = requests.post("https://api.creatomate.com/v1/renders", json=payload, headers=headers)
@@ -296,11 +312,10 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
             render_id = render_res[0]["id"]
             video_url = None
             
-            for _ in range(25):
+            for _ in range(30):
                 time.sleep(3)
                 check_resp = requests.get(f"https://api.creatomate.com/v1/renders/{render_id}", headers=headers)
                 check_data = check_resp.json()
-                
                 if check_data.get("status") == "succeeded":
                     video_url = check_data.get("url")
                     break
@@ -310,19 +325,36 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
             if video_url:
                 update_credits(user_id, -1)
                 bot.delete_message(chat_id, status_msg_id)
-                bot.send_video(chat_id, video_url, caption=f"🎬 **Ваше готовое видео из {len(photos_list)} фото!**", parse_mode="Markdown")
-                bot.send_message(chat_id, f"✅ Списана 1 генерация. Осталось: **{credits_left - 1}**.", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+                
+                # Отправляем смонтированное видео
+                bot.send_video(
+                    chat_id, 
+                    video_url, 
+                    caption=f"🎬 **Ваш динамичный ролик из {len(photos_list)} фото!**", 
+                    parse_mode="Markdown"
+                )
+                
+                # Отправляем голос диктора
+                if os.path.exists(voice_filename):
+                    with open(voice_filename, "rb") as audio:
+                        bot.send_voice(chat_id, audio, caption="🎙 **Дикторская озвучка вашего текста**")
+                        
+                bot.send_message(
+                    chat_id, 
+                    f"✅ Списана 1 генерация. Осталось: **{credits_left - 1}**.", 
+                    reply_markup=get_main_keyboard(user_id), 
+                    parse_mode="Markdown"
+                )
             else:
-                bot.edit_message_text("❌ Рендер занял больше времени, чем ожидалось. Попробуйте еще раз.", chat_id, status_msg_id)
+                bot.edit_message_text("❌ Рендер занял больше времени. Попробуйте ещё раз.", chat_id, status_msg_id)
         else:
             bot.edit_message_text(f"❌ Ошибка Creatomate: {render_res}", chat_id, status_msg_id)
             
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка сборки видео: {e}", chat_id, status_msg_id)
+        bot.edit_message_text(f"❌ Ошибка сборки: {e}", chat_id, status_msg_id)
     finally:
         if os.path.exists(voice_filename):
             os.remove(voice_filename)
-        # Очищаем данные пользователя после генерации
         if user_id in user_media_data:
             del user_media_data[user_id]
 
@@ -335,13 +367,12 @@ def handle_all_text_messages(message):
     text = message.text.strip()
     credits_left = get_user_credits(user_id)
     
-    # Проверяем, загружены ли фото у пользователя
     if user_id in user_media_data and user_media_data[user_id]["photos"]:
         photos_list = user_media_data[user_id]["photos"]
         script_text = ""
         
         if text.lower() == "готово":
-            script_text = user_media_data[user_id].get("caption") or "Загадочный мир вокруг нас. Посмотри на эти кадры."
+            script_text = user_media_data[user_id].get("caption") or "Посмотрите на эти удивительные кадры вокруг нас."
         else:
             script_text = text
             
@@ -349,7 +380,6 @@ def handle_all_text_messages(message):
         assemble_video(message.chat.id, user_id, photos_list, script_text, status_msg.message_id)
         return
 
-    # Обычная генерация сценариев с ИИ
     if credits_left <= 0:
         bot.reply_to(message, "⛔ **Баланс исчерпан.** Пополните баланс звёздами ниже.", reply_markup=get_main_keyboard(user_id))
         return
@@ -407,7 +437,7 @@ def handle_callback(call):
         bot.send_message(
             call.message.chat.id, 
             "📸 **Отправьте от 1 до 5 фотографий!**\n"
-            "Вы можете прислать их сразу альбомом или по одной. После этого напишите текст для диктора.", 
+            "Вы можете прислать их альбомом или по одной. После этого напишите текст для диктора.", 
             parse_mode="Markdown"
         )
     elif call.data.startswith("genre_"):
@@ -461,7 +491,7 @@ def process_payment(message):
             pass
 
 # =====================================================================
-# 11. ЗАПУСК
+# 11. ЗАПУСК БОТА
 # =====================================================================
 if __name__ == "__main__":
     bot.infinity_polling()

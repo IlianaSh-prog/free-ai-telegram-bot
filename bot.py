@@ -38,9 +38,10 @@ CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 # ⚠️ ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID И ID ВЛАДЕЛЬЦА (узнать в @userinfobot)
 ADMIN_IDS = [8725167633, 1368485826]
 
-PACKAGE_PRICE_STARS = 50
-PACKAGE_CREDITS = 20
-MAX_PHOTOS = 5
+PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
+PACKAGE_CREDITS = 20      # Генераций в пакете
+
+MAX_PHOTOS = 5  # Максимум фото на одно видео
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
 client = OpenAI(
@@ -184,8 +185,9 @@ def handle_admin_stats(message):
         c.execute("SELECT COUNT(*) FROM users")
         total_users = c.fetchone()[0]
         
-        c.execute("SELECT COUNT(DISTINCT user_id), COUNT(*), SUM(amount) FROM payments")
-        row = c.fetchone()
+        cursor_pay = conn.cursor()
+        cursor_pay.execute("SELECT COUNT(DISTINCT user_id), COUNT(*), SUM(amount) FROM payments")
+        row = cursor_pay.fetchone()
         paying_users = row[0] or 0
         total_payments = row[1] or 0
         total_revenue = row[2] or 0
@@ -215,7 +217,7 @@ def handle_add_credits(message):
     bot.reply_to(message, f"👑 **Начислено +{amount} генераций!**\nТекущий баланс: **{new_bal}**.", parse_mode="Markdown")
 
 # =====================================================================
-# 7. ПРИЁМ ФОТОГРАФИЙ С СОРТИРОВКОЙ ПО MESSAGE_ID
+# 7. ПРИЁМ ФОТОГРАФИЙ
 # =====================================================================
 @bot.message_handler(content_types=['photo'])
 def handle_incoming_photos(message):
@@ -235,7 +237,6 @@ def handle_incoming_photos(message):
     if len(user_media_data[user_id]["photos"]) >= MAX_PHOTOS:
         return
         
-    # Сохраняем кортеж (ID сообщения, ссылка на фото), чтобы потом отсортировать!
     user_media_data[user_id]["photos"].append((message.message_id, photo_url))
     current_count = len(user_media_data[user_id]["photos"])
     
@@ -271,16 +272,13 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
         except Exception:
             pass
             
-        # 3. Сортируем фотографии по message_id (чтобы порядок не путался!)
+        # 3. Сортируем фотографии по message_id
         sorted_photos = [url for msg_id, url in sorted(photos_list, key=lambda x: x[0])]
         count_photos = len(sorted_photos)
         
-        # 4. Динамический расчёт длины слайдов на основе длины текста
-        # Средняя скорость диктора: 12 символов в секунду
+        # 4. Динамический расчёт длины слайдов
         char_count = len(text_script)
         estimated_total_duration = max(4.0, char_count / 12.0)
-        
-        # Делим всю длину аудио на количество фотографий
         duration_per_slide = round(estimated_total_duration / count_photos, 2)
         
         headers = {

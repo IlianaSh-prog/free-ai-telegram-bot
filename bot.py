@@ -19,7 +19,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
-    def log_message(self, *args): return
+
+    def log_message(self, *args):
+        return
 
 def run_webserver():
     port = int(os.environ.get("PORT", 10000))
@@ -35,15 +37,13 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 
-# ⚠️ ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID И ID ВЛАДЕЛЬЦА (узнать в @userinfobot)
-ADMIN_IDS = [8725167633, 1368485826]
+ADMIN_IDS = [8725167633, 1368485826]  # Укажите ваши Telegram ID
 
-PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
-PACKAGE_CREDITS = 20      # Генераций в пакете
+PACKAGE_PRICE_STARS = 50
+PACKAGE_CREDITS = 20
+MAX_PHOTOS = 5
 
-MAX_PHOTOS = 5  # Максимум фото на 1 видео
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
 client = OpenAI(
     api_key=PROXYAPI_KEY,
     base_url="https://api.proxyapi.ru/v1"
@@ -52,85 +52,93 @@ client = OpenAI(
 user_media_data = {}
 user_state = {}
 
+# Блокировка для потокобезопасной работы с SQLite
+db_lock = threading.Lock()
+
 # =====================================================================
-# 3. БАЗА ДАННЫХ С ЗАЩИТОЙ ОТ БЛОКИРОВОК (WAL MODE + TIMEOUT)
+# 3. БАЗА ДАННЫХ SQLITE С ПОЛНОЙ БЛОКИРОВКОЙ ПОТОКОВ
 # =====================================================================
-def get_db_connection():
-    conn = sqlite3.connect("bot_database.db", timeout=30.0)
+def get_db():
+    conn = sqlite3.connect("bot_database.db", timeout=60.0)
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout = 60000;")
     return conn
 
 def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            credits INTEGER DEFAULT 2
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            amount INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                credits INTEGER DEFAULT 2
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                amount INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
 
 init_db()
 
 def get_user_credits(user_id, username=""):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT credits FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    
-    if row is None:
-        start_credits = 10 if user_id in ADMIN_IDS else 2
-        safe_name = username if username else "user"
-        c.execute("INSERT INTO users (user_id, username, credits) VALUES (?, ?, ?)", 
-                  (user_id, safe_name, start_credits))
-        conn.commit()
-        credits = start_credits
-    else:
-        credits = row[0]
-        if user_id in ADMIN_IDS and credits < 10:
-            c.execute("UPDATE users SET credits = 10 WHERE user_id = ?", (user_id,))
+    with db_lock:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT credits FROM users WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        
+        if row is None:
+            start_credits = 10 if user_id in ADMIN_IDS else 2
+            safe_name = username if username else "user"
+            c.execute("INSERT INTO users (user_id, username, credits) VALUES (?, ?, ?)", 
+                      (user_id, safe_name, start_credits))
             conn.commit()
-            credits = 10
-            
-    conn.close()
-    return credits
+            credits = start_credits
+        else:
+            credits = row[0]
+            if user_id in ADMIN_IDS and credits < 10:
+                c.execute("UPDATE users SET credits = 10 WHERE user_id = ?", (user_id,))
+                conn.commit()
+                credits = 10
+                
+        conn.close()
+        return credits
 
 def update_credits(user_id, count):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (count, user_id))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (count, user_id))
+        conn.commit()
+        conn.close()
 
 def log_payment(user_id, username, amount):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO payments (user_id, username, amount) VALUES (?, ?, ?)", 
-              (user_id, username, amount))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("INSERT INTO payments (user_id, username, amount) VALUES (?, ?, ?)", 
+                  (user_id, username, amount))
+        conn.commit()
+        conn.close()
 
 # =====================================================================
-# 4. СИНТЕЗ ГОЛОСА ЧЕРЕЗ EDGE-TTS
+# 4. СИНТЕЗ ГОЛОСА
 # =====================================================================
 async def generate_voice_file(text, output_path):
     communicate = edge_tts.Communicate(text, "ru-RU-DmitryNeural")
     await communicate.save(output_path)
 
 # =====================================================================
-# 5. КЛАВИАТУРА И МЕНЮ
+# 5. КЛАВИАТУРА
 # =====================================================================
 def get_main_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -152,7 +160,7 @@ def get_main_keyboard(user_id):
     return markup
 
 # =====================================================================
-# 6. КОМАНДЫ ДЛЯ ВСЕХ И АДМИНОВ
+# 6. КОМАНДЫ
 # =====================================================================
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -163,8 +171,8 @@ def handle_start(message):
     text = (
         f"👋 **Привет, {name}!**\n\n"
         "Я — твой ИИ-продюсер и видеомонтажёр для **Shorts, Reels и TikTok**.\n\n"
-        "• 🎬 **Монтаж видео:** пришли от 1 до 5 фото (или с текстом в подписи)!\n"
-        "• ✍️ **Сценарий ИИ:** выбери тематику в меню ниже.\n\n"
+        "• 🎬 **Монтаж видео:** пришлите от 1 до 5 фото (можно с текстом в подписи)!\n"
+        "• ✍️ **Сценарий ИИ:** выберите тематику в меню ниже.\n\n"
         f"🎁 Твой баланс: **{credits_left} генераций**."
     )
     bot.send_message(message.chat.id, text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
@@ -175,17 +183,18 @@ def handle_admin_stats(message):
         bot.reply_to(message, "⛔ У вас нет доступа к этой команде.")
         return
     
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(DISTINCT user_id), COUNT(*), SUM(amount) FROM payments")
-    row = c.fetchone()
-    paying_users = row[0] or 0
-    total_payments = row[1] or 0
-    total_revenue = row[2] or 0
-    conn.close()
+    with db_lock:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(DISTINCT user_id), COUNT(*), SUM(amount) FROM payments")
+        row = c.fetchone()
+        paying_users = row[0] or 0
+        total_payments = row[1] or 0
+        total_revenue = row[2] or 0
+        conn.close()
     
     stats_text = (
         "📊 **ОТЧЕТ ПО ДОХОДАМ И БОТУ**\n\n"
@@ -211,7 +220,7 @@ def handle_add_credits(message):
     bot.reply_to(message, f"👑 **Начислено +{amount} генераций!**\nТекущий баланс: **{new_bal}**.", parse_mode="Markdown")
 
 # =====================================================================
-# 7. ПРИЁМ И НАКОПЛЕНИЕ ФОТОГРАФИЙ (ДО 5 ШТУК)
+# 7. ПРИЁМ ФОТОГРАФИЙ
 # =====================================================================
 @bot.message_handler(content_types=['photo'])
 def handle_incoming_photos(message):
@@ -229,7 +238,6 @@ def handle_incoming_photos(message):
     photo_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
     
     if len(user_media_data[user_id]["photos"]) >= MAX_PHOTOS:
-        bot.reply_to(message, f"⚠️ Максимум {MAX_PHOTOS} фото! Напишите текст или слово **Готово**.", parse_mode="Markdown")
         return
         
     user_media_data[user_id]["photos"].append(photo_url)
@@ -238,24 +246,15 @@ def handle_incoming_photos(message):
     if message.caption:
         user_media_data[user_id]["caption"] = message.caption
         
-    if current_count == 1:
-        bot.reply_to(
-            message, 
-            f"📸 **Фото №1 принято!**\n"
-            f"Можете отправить ещё до {MAX_PHOTOS - 1} фото.\n"
-            f"Когда закончите — напишите текст для диктора или слово **Готово**.",
-            parse_mode="Markdown"
-        )
-    else:
-        bot.reply_to(
-            message, 
-            f"✅ **Фото №{current_count} загружено!** ({current_count}/{MAX_PHOTOS})\n"
-            f"Напишите текст для диктора или слово **Готово**.",
-            parse_mode="Markdown"
-        )
+    bot.reply_to(
+        message, 
+        f"✅ **Фото №{current_count} загружено!** ({current_count}/{MAX_PHOTOS})\n"
+        f"Отправьте ещё фото или напишите текст для диктора (можно слово **Готово**).",
+        parse_mode="Markdown"
+    )
 
 # =====================================================================
-# 8. ФУНКЦИЯ СБОРКИ СЛАЙДШОУ В CREATOMATE С ГОЛОСОМ
+# 8. СБОРКА ВИДЕО В CREATOMATE
 # =====================================================================
 def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
     voice_filename = f"voice_{user_id}_{int(time.time())}.mp3"
@@ -265,24 +264,29 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
         # 1. Синтез дикторской речи
         asyncio.run(generate_voice_file(text_script, voice_filename))
         
-        # 2. Отправляем аудио в Telegram, чтобы получить для него прямую веб-ссылку
-        audio_msg = None
+        # 2. Получаем ссылку на аудио через скрытую загрузку в Telegram
         with open(voice_filename, "rb") as audio_file:
-            audio_msg = bot.send_audio(chat_id, audio_file, caption="🎙 **Дикторская озвучка**")
+            audio_msg = bot.send_audio(chat_id, audio_file, caption="🎙 Подготовка дорожки...")
             
         audio_file_info = bot.get_file(audio_msg.audio.file_id)
         audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{audio_file_info.file_path}"
         
+        # Удаляем временное аудио-сообщение из чата
+        try:
+            bot.delete_message(chat_id, audio_msg.message_id)
+        except Exception:
+            pass
+            
         headers = {
             "Authorization": f"Bearer {CREATOMATE_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        # 3. Формируем элементы роликов (картинки + аудиодорожка)
+        # 3. Расчёт таймингов слайдов
+        count_photos = max(1, len(photos_list[:MAX_PHOTOS]))
         duration_per_slide = 3.5
-        elements = []
         
-        # Картинки с плавным приближением
+        elements = []
         for idx, photo_url in enumerate(photos_list[:MAX_PHOTOS]):
             elements.append({
                 "type": "image",
@@ -304,14 +308,12 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 ]
             })
             
-        # Накладываем аудиодорожку поверх картинок
         elements.append({
             "type": "audio",
             "track": 2,
             "source": audio_url
         })
         
-        # Оборачиваем конструкцию строго в параметр "source" для Creatomate API
         payload = {
             "source": {
                 "output_format": "mp4",
@@ -344,14 +346,12 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 update_credits(user_id, -1)
                 bot.delete_message(chat_id, status_msg_id)
                 
-                # Отправляем готовый смонтированный видеоролик со звуком!
                 bot.send_video(
                     chat_id, 
                     video_url, 
-                    caption=f"🎬 **Ваш динамичный ролик из {len(photos_list)} фото с озвучкой!**", 
+                    caption=f"🎬 **Готовое видео из {count_photos} фото с озвучкой!**", 
                     parse_mode="Markdown"
                 )
-                        
                 bot.send_message(
                     chat_id, 
                     f"✅ Списана 1 генерация. Осталось: **{credits_left - 1}**.", 
@@ -359,12 +359,12 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                     parse_mode="Markdown"
                 )
             else:
-                bot.edit_message_text("❌ Рендер занял больше времени. Попробуйте ещё раз.", chat_id, status_msg_id)
+                bot.edit_message_text("❌ Рендер видео занял больше времени. Попробуйте ещё раз.", chat_id, status_msg_id)
         else:
             bot.edit_message_text(f"❌ Ошибка Creatomate: {render_res}", chat_id, status_msg_id)
             
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка сборки: {e}", chat_id, status_msg_id)
+        bot.edit_message_text(f"❌ Ошибка сборки видео: {e}", chat_id, status_msg_id)
     finally:
         if os.path.exists(voice_filename):
             os.remove(voice_filename)
@@ -372,7 +372,7 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
             del user_media_data[user_id]
 
 # =====================================================================
-# 9. ТЕКСТОВЫЕ СООБЩЕНИЯ (ГОТОВО / ТЕКСТ ДЛЯ ВИДЕО / СЦЕНАРИИ)
+# 9. ОБРАБОТКА ТЕКСТА
 # =====================================================================
 @bot.message_handler(func=lambda message: True)
 def handle_all_text_messages(message):
@@ -382,15 +382,14 @@ def handle_all_text_messages(message):
     
     if user_id in user_media_data and user_media_data[user_id]["photos"]:
         photos_list = user_media_data[user_id]["photos"]
-        script_text = ""
-        
         if text.lower() == "готово":
-            script_text = user_media_data[user_id].get("caption") or "Посмотрите на эти удивительные кадры вокруг нас."
+            script_text = user_media_data[user_id].get("caption") or "Посмотрите на эти кадры вокруг нас."
         else:
             script_text = text
             
-        status_msg = bot.reply_to(message, f"🎬 *Принято {len(photos_list)} фото! Озвучиваем диктором и запускаем монтаж...*", parse_mode="Markdown")
-        assemble_video(message.chat.id, user_id, photos_list, script_text, status_msg.message_id)
+        status_msg = bot.reply_to(message, f"🎬 *Монтируем видео из {len(photos_list)} фото с озвучкой...*", parse_mode="Markdown")
+        assemble_video(
+message.chat.id, user_id, photos_list, script_text, status_msg.message_id)
         return
 
     if credits_left <= 0:
@@ -504,7 +503,7 @@ def process_payment(message):
             pass
 
 # =====================================================================
-# 11. ЗАПУСК БОТА
+# 11. ЗАПУСК
 # =====================================================================
 if __name__ == "__main__":
     bot.infinity_polling()

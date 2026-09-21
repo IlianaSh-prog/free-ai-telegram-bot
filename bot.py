@@ -19,9 +19,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
-
-    def log_message(self, *args):
-        return
+    def log_message(self, *args): return
 
 def run_webserver():
     port = int(os.environ.get("PORT", 10000))
@@ -36,7 +34,6 @@ threading.Thread(target=run_webserver, daemon=True).start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
-CREATOMATE_TEMPLATE_ID = os.environ.get("CREATOMATE_TEMPLATE_ID")
 
 # ⚠️ ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID И ID ВЛАДЕЛЬЦА (узнать в @userinfobot)
 ADMIN_IDS = [8725167633, 1368485826]
@@ -44,7 +41,7 @@ ADMIN_IDS = [8725167633, 1368485826]
 PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
 PACKAGE_CREDITS = 20      # Генераций в пакете
 
-MAX_PHOTOS = 5  # Максимум фото на одно видео
+MAX_PHOTOS = 5  # Максимум фото на 1 видео
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = OpenAI(
@@ -166,8 +163,8 @@ def handle_start(message):
     text = (
         f"👋 **Привет, {name}!**\n\n"
         "Я — твой ИИ-продюсер и видеомонтажёр для **Shorts, Reels и TikTok**.\n\n"
-        "• 🎬 **Монтаж видео:** пришлите от 1 до 5 фото (или с текстом в подписи)!\n"
-        "• ✍️ **Сценарий ИИ:** выберите тематику в меню ниже.\n\n"
+        "• 🎬 **Монтаж видео:** пришли от 1 до 5 фото (или с текстом в подписи)!\n"
+        "• ✍️ **Сценарий ИИ:** выбери тематику в меню ниже.\n\n"
         f"🎁 Твой баланс: **{credits_left} генераций**."
     )
     bot.send_message(message.chat.id, text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
@@ -258,7 +255,7 @@ def handle_incoming_photos(message):
         )
 
 # =====================================================================
-# 8. ФУНКЦИЯ СБОРКИ СЛАЙДШОУ В CREATOMATE
+# 8. ФУНКЦИЯ СБОРКИ СЛАЙДШОУ В CREATOMATE С ГОЛОСОМ
 # =====================================================================
 def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
     voice_filename = f"voice_{user_id}_{int(time.time())}.mp3"
@@ -268,14 +265,24 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
         # 1. Синтез дикторской речи
         asyncio.run(generate_voice_file(text_script, voice_filename))
         
+        # 2. Отправляем аудио в Telegram, чтобы получить для него прямую веб-ссылку
+        audio_msg = None
+        with open(voice_filename, "rb") as audio_file:
+            audio_msg = bot.send_audio(chat_id, audio_file, caption="🎙 **Дикторская озвучка**")
+            
+        audio_file_info = bot.get_file(audio_msg.audio.file_id)
+        audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{audio_file_info.file_path}"
+        
         headers = {
             "Authorization": f"Bearer {CREATOMATE_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        # 2. Формируем покадровые слайды (по 3.5 секунды на каждый)
+        # 3. Формируем элементы роликов (картинки + аудиодорожка)
         duration_per_slide = 3.5
         elements = []
+        
+        # Картинки с плавным приближением
         for idx, photo_url in enumerate(photos_list[:MAX_PHOTOS]):
             elements.append({
                 "type": "image",
@@ -297,12 +304,22 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 ]
             })
             
+        # Накладываем аудиодорожку поверх картинок
+        elements.append({
+            "type": "audio",
+            "track": 2,
+            "source": audio_url
+        })
+        
+        # Оборачиваем конструкцию строго в параметр "source" для Creatomate API
         payload = {
-            "output_format": "mp4",
-            "width": 1080,
-            "height": 1920,
-            "frame_rate": 30,
-            "elements": elements
+            "source": {
+                "output_format": "mp4",
+                "width": 1080,
+                "height": 1920,
+                "frame_rate": 30,
+                "elements": elements
+            }
         }
         
         resp = requests.post("https://api.creatomate.com/v1/renders", json=payload, headers=headers)
@@ -316,6 +333,7 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 time.sleep(3)
                 check_resp = requests.get(f"https://api.creatomate.com/v1/renders/{render_id}", headers=headers)
                 check_data = check_resp.json()
+                
                 if check_data.get("status") == "succeeded":
                     video_url = check_data.get("url")
                     break
@@ -326,18 +344,13 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 update_credits(user_id, -1)
                 bot.delete_message(chat_id, status_msg_id)
                 
-                # Отправляем смонтированное видео
+                # Отправляем готовый смонтированный видеоролик со звуком!
                 bot.send_video(
                     chat_id, 
                     video_url, 
-                    caption=f"🎬 **Ваш динамичный ролик из {len(photos_list)} фото!**", 
+                    caption=f"🎬 **Ваш динамичный ролик из {len(photos_list)} фото с озвучкой!**", 
                     parse_mode="Markdown"
                 )
-                
-                # Отправляем голос диктора
-                if os.path.exists(voice_filename):
-                    with open(voice_filename, "rb") as audio:
-                        bot.send_voice(chat_id, audio, caption="🎙 **Дикторская озвучка вашего текста**")
                         
                 bot.send_message(
                     chat_id, 

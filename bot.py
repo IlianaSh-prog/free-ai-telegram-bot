@@ -35,7 +35,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 
-# ⚠️ ВСТАВЬТЕ ВАШ TELEGRAM ID
+# ⚠️ ВСТАВЬТЕ СЮДА ВАШ ТЕЛЕГРАМ ID
 ADMIN_IDS = [8725167633, 1368485826]
 
 PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
@@ -152,8 +152,7 @@ def run_kling_generation(prompt, image_url=None):
     try:
         response = requests.post("https://api.proxyapi.ru/v1/videos", json=payload, headers=headers, timeout=30)
         data = response.json()
-        print(f"[KLING REQUEST]: status
-={response.status_code}, data={data}")
+        print(f"[KLING REQUEST]: status={response.status_code}, data={data}")
         
         if response.status_code != 200:
             return None

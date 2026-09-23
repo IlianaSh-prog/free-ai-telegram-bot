@@ -38,8 +38,8 @@ CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 # ⚠️ ВСТАВЬТЕ ВАШ TELEGRAM ID
 ADMIN_IDS = [8725167633, 1368485826]
 
-PACKAGE_PRICE_STARS = 50
-PACKAGE_CREDITS = 20
+PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
+PACKAGE_CREDITS = 20      # Генераций в пакете
 MAX_PHOTOS = 5
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
@@ -132,7 +132,7 @@ async def generate_voice_file(text, output_path):
     await communicate.save(output_path)
 
 # =====================================================================
-# 5. БЕЗОПАСНЫЙ ВЫЗОВ KLING 3.0 (Ошибки пишутся в логи Render)
+# 5. БЕЗОПАСНЫЙ ВЫЗОВ KLING 3.0
 # =====================================================================
 def run_kling_generation(prompt, image_url=None):
     headers = {
@@ -152,7 +152,8 @@ def run_kling_generation(prompt, image_url=None):
     try:
         response = requests.post("https://api.proxyapi.ru/v1/videos", json=payload, headers=headers, timeout=30)
         data = response.json()
-        print(f"[KLING REQUEST STATUS]: {response.status_code}, BODY: {data}")
+        print(f"[KLING REQUEST]: status
+={response.status_code}, data={data}")
         
         if response.status_code != 200:
             return None
@@ -181,7 +182,7 @@ def run_kling_generation(prompt, image_url=None):
                 
         return None
     except Exception as e:
-        print(f"[KLING ERROR EXCEPTION]: {e}")
+        print(f"[KLING EXCEPTION]: {e}")
         return None
 
 # =====================================================================
@@ -191,10 +192,10 @@ def get_main_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=1)
     credits_left = get_user_credits(user_id)
     
-    btn_animate = types.InlineKeyboardButton("✨ Оживить фото (Kling 3.0 AI)", callback_data="mode_animate_photo")
-    btn_cartoon = types.InlineKeyboardButton("🧸 Создать мультфильм / фильм (Kling 3.0)", callback_data="mode_cartoon")
+    btn_animate = types.InlineKeyboardButton("✨ Оживить фото (Kling 3.0)", callback_data="mode_animate_photo")
+    btn_cartoon = types.InlineKeyboardButton("🧸 Сгенерировать видео по сюжету", callback_data="mode_cartoon")
     btn_slideshow = types.InlineKeyboardButton("🎬 Смонтировать слайдшоу с озвучкой", callback_data="mode_slideshow")
-    btn_script = types.InlineKeyboardButton("✍️ Написать сценарий для Shorts/Reels", callback_data="mode_script")
+    btn_script = types.InlineKeyboardButton("✍️ Написать сценарий для соцсетей", callback_data="mode_script")
     btn_buy = types.InlineKeyboardButton(f"⭐ Купить 20 генераций (Баланс: {credits_left})", callback_data="buy_credits")
     btn_rules = types.InlineKeyboardButton("📄 Правила использования", url="https://telegra.ph")
     
@@ -202,7 +203,7 @@ def get_main_keyboard(user_id):
     return markup
 
 # =====================================================================
-# 7. КОМАНДЫ
+# 7. КОМАНДЫ ДЛЯ ВСЕХ И АДМИНИСТРАТОРОВ
 # =====================================================================
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -211,14 +212,11 @@ def handle_start(message):
     credits_left = get_user_credits(user_id, message.from_user.username)
     
     welcome_text = (
-        f"👋 **Привет, {name}!**\n\n"
-        "Добро пожаловать в **ReelsGenie** — твою мобильную нейро-видеостудию на базе **Kling 3.0**!\n\n"
-        "🎬 **Выбери режим создания контента:**\n"
-        "• ✨ **Оживить фото:** кинематографичная анимация снимка через Kling 3.0;\n"
-        "• 🧸 **Создать мультфильм / фильм:** генерация видео по твоему текстовому сюжету;\n"
-        "• 🎬 **Слайдшоу с озвучкой:** монтаж клипа из фото под голос диктора;\n"
-        "• ✍️ **Сценарий ИИ:** вирусный хук и покадровый план для соцсетей.\n\n"
-        f"🎁 Твой баланс: **{credits_left} генераций**."
+        f"👋 **Рад видеть тебя, {name}!**\n\n"
+        "Я помогу создать вирусный контент для твоих соцсетей всего в пару кликов.\n"
+        "Используй мощь нейросетей **Kling 3.0** и **GPT-4o**, чтобы привлекать тысячи просмотров без навыков сложного видеомонтажа!\n\n"
+        f"🎁 Твой баланс: **{credits_left} генераций**.\n\n"
+        "👇 **Выбери нужный инструмент ниже:**"
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
 
@@ -276,7 +274,7 @@ def handle_callback(call):
         user_state[user_id] = {"mode": "waiting_animate_photo"}
         bot.send_message(
             call.message.chat.id, 
-            "✨ **Режим: Оживление фото в Kling 3.0**\n\n"
+            "✨ **Режим: Оживление фото**\n\n"
             "Пришлите **одно фото**, которое хотите превратить в живое видео.\n"
             "В подписи можно указать движение (например: *«камера приближается, персонаж моргает и улыбается»*).",
             parse_mode="Markdown"
@@ -286,8 +284,8 @@ def handle_callback(call):
         user_state[user_id] = {"mode": "waiting_cartoon_prompt"}
         bot.send_message(
             call.message.chat.id,
-            "🧸 **Режим: Генерация видео / мультфильма (Kling 3.0)**\n\n"
-            "Опишите сцену для генерации на русском или английском языке.\n"
+            "🧸 **Режим: Генерация видео по описанию**\n\n"
+            "Опишите сюжет или сцену на русском или английском языке.\n"
             "Например: *«3D-мультфильм в стиле Pixar: пушистый лисенок в очках читает светящуюся книгу в волшебном лесу»*.",
             parse_mode="Markdown"
         )

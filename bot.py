@@ -35,11 +35,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 
-# ⚠️ ВСТАВЬТЕ СЮДА ВАШИ TELEGRAM ID
+# ⚠️ ВСТАВЬТЕ ВАШ TELEGRAM ID
 ADMIN_IDS = [8725167633, 1368485826]
 
-PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
-PACKAGE_CREDITS = 20      # Генераций в пакете
+PACKAGE_PRICE_STARS = 50
+PACKAGE_CREDITS = 20
 MAX_PHOTOS = 5
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
@@ -51,11 +51,10 @@ client = OpenAI(
 user_media_data = {}
 user_state = {}
 
-# Блокировка потоков для SQLite
 db_lock = threading.Lock()
 
 # =====================================================================
-# 3. БАЗА ДАННЫХ SQLITE (Балансы и Платежи)
+# 3. БАЗА ДАННЫХ SQLITE
 # =====================================================================
 def get_db():
     conn = sqlite3.connect("bot_database.db", timeout=60.0)
@@ -133,7 +132,7 @@ async def generate_voice_file(text, output_path):
     await communicate.save(output_path)
 
 # =====================================================================
-# 5. ВЫЗОВ НЕЙРОСЕТИ KLING 3.0 ЧЕРЕЗ PROXYAPI (Image-to-Video и Text-to-Video)
+# 5. БЕЗОПАСНЫЙ ВЫЗОВ KLING 3.0 (Ошибки пишутся в логи Render)
 # =====================================================================
 def run_kling_generation(prompt, image_url=None):
     headers = {
@@ -150,31 +149,43 @@ def run_kling_generation(prompt, image_url=None):
     if image_url:
         payload["image_url"] = image_url
 
-    # Создание задачи на генерацию видео
-    response = requests.post("https://api.proxyapi.ru/v1/videos", json=payload, headers=headers)
-    data = response.json()
-    
-    task_id = data.get("id") or data.get("task_id")
-    if not task_id:
-        return None, f"Ошибка создания задачи в Kling: {data}"
+    try:
+        response = requests.post("https://api.proxyapi.ru/v1/videos", json=payload, headers=headers, timeout=30)
+        data = response.json()
+        print(f"[KLING REQUEST STATUS]: {response.status_code}, BODY: {data}")
         
-    # Опрос статуса генерации (видео рассчитывается от 60 до 120 секунд)
-    for _ in range(40):
-        time.sleep(5)
-        check_res = requests.get(f"https://api.proxyapi.ru/v1/videos/{task_id}", headers=headers)
-        check_data = check_res.json()
-        
-        status = check_data.get("status")
-        if status == "succeeded" or status == "completed":
-            video_url = check_data.get("video_url") or check_data.get("url") or (check_data.get("output", {}).get("url") if isinstance(check_data.get("output"), dict) else None)
-            return video_url, None
-        elif status == "failed":
-            return None, f"Генерация Kling не удалась: {check_data.get('error', 'неизвестная ошибка')}"
+        if response.status_code != 200:
+            return None
             
-    return None, "Превышено время ожидания рендера Kling 3.0."
+        task_id = data.get("id") or data.get("task_id")
+        if not task_id:
+            return None
+            
+        for _ in range(40):
+            time.sleep(5)
+            check_res = requests.get(f"https://api.proxyapi.ru/v1/videos/{task_id}", headers=headers, timeout=15)
+            check_data = check_res.json()
+            
+            status = check_data.get("status")
+            if status in ["succeeded", "completed"]:
+                video_url = (
+                    check_data.get("video_url") 
+                    or check_data.get("url") 
+                    or (check_data.get("output", {}).get("url") if isinstance(check_data.get("output"), dict) else None)
+                )
+                if video_url:
+                    return video_url
+            elif status == "failed":
+                print(f"[KLING FAILED]: {check_data}")
+                return None
+                
+        return None
+    except Exception as e:
+        print(f"[KLING ERROR EXCEPTION]: {e}")
+        return None
 
 # =====================================================================
-# 6. ГЛАВНОЕ МЕНЮ РЕЖИМОВ REELSGENIE
+# 6. ГЛАВНОЕ МЕНЮ
 # =====================================================================
 def get_main_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -191,7 +202,7 @@ def get_main_keyboard(user_id):
     return markup
 
 # =====================================================================
-# 7. КОМАНДЫ ДЛЯ ВСЕХ И АДМИНИСТРАТОРОВ
+# 7. КОМАНДЫ
 # =====================================================================
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -315,7 +326,7 @@ def handle_callback(call):
         )
 
 # =====================================================================
-# 9. ПРИЁМ ФОТОГРАФИЙ (ОЖИВЛЕНИЕ В KLING 3.0 ИЛИ СЛАЙДШОУ)
+# 9. ПРИЁМ ФОТОГРАФИЙ
 # =====================================================================
 @bot.message_handler(content_types=['photo'])
 def handle_incoming_photos(message):
@@ -330,12 +341,11 @@ def handle_incoming_photos(message):
     file_info = bot.get_file(message.photo[-1].file_id)
     photo_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
     
-    # СЦЕНАРИЙ А: НАСТОЯЩЕЕ ОЖИВЛЕНИЕ ФОТО В KLING 3.0
     if state == "waiting_animate_photo":
         prompt_text = message.caption or "High quality, smooth realistic camera motion, cinematic lighting, 4k"
         status_msg = bot.reply_to(message, "✨ *Нейросеть Kling 3.0 оживляет ваше фото... Пожалуйста, подождите 1-2 минуты.*", parse_mode="Markdown")
         
-        video_url, error = run_kling_generation(prompt_text, image_url=photo_url)
+        video_url = run_kling_generation(prompt_text, image_url=photo_url)
         
         if video_url:
             update_credits(user_id, -1)
@@ -354,12 +364,15 @@ def handle_incoming_photos(message):
                 parse_mode="Markdown"
             )
         else:
-            bot.edit_message_text(f"❌ {error}", message.chat.id, status_msg.message_id)
+            bot.edit_message_text(
+                "😔 Сервер генерации сейчас сильно загружен. Пожалуйста, попробуйте еще раз через пару минут!", 
+                message.chat.id, 
+                status_msg.message_id
+            )
             
         user_state[user_id] = {}
         return
 
-    # СЦЕНАРИЙ Б: СЛАЙДШОУ (Creatomate)
     if user_id not in user_media_data:
         user_media_data[user_id] = {"photos": [], "caption": None}
         
@@ -488,10 +501,11 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
             else:
                 bot.edit_message_text("❌ Рендер видео занял больше времени. Попробуйте ещё раз.", chat_id, status_msg_id)
         else:
-            bot.edit_message_text(f"❌ Ошибка Creatomate: {render_res}", chat_id, status_msg_id)
+            bot.edit_message_text("❌ Ошибка сборки видео в облаке.", chat_id, status_msg_id)
             
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка сборки видео: {e}", chat_id, status_msg_id)
+        print(f"[CREATOMATE ERROR]: {e}")
+        bot.edit_message_text("❌ Произошла ошибка при сборке ролика.", chat_id, status_msg_id)
     finally:
         if os.path.exists(voice_filename):
             os.remove(voice_filename)
@@ -499,7 +513,7 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
             del user_media_data[user_id]
 
 # =====================================================================
-# 11. ОБРАБОТКА ТЕКСТА (МУЛЬТФИЛЬМЫ KLING 3.0 / СЦЕНАРИИ GPT)
+# 11. ОБРАБОТКА ТЕКСТА
 # =====================================================================
 @bot.message_handler(func=lambda message: True)
 def handle_all_text_messages(message):
@@ -508,7 +522,6 @@ def handle_all_text_messages(message):
     credits_left = get_user_credits(user_id)
     state = user_state.get(user_id, {}).get("mode")
     
-    # 1. Завершение монтажа слайдшоу
     if user_id in user_media_data and user_media_data[user_id]["photos"]:
         photos_list = user_media_data[user_id]["photos"]
         script_text = user_media_data[user_id].get("caption") if text.lower() == "готово" else text
@@ -523,11 +536,10 @@ def handle_all_text_messages(message):
         bot.reply_to(message, "⛔ **Баланс исчерпан.** Пополните баланс звёздами ниже.", reply_markup=get_main_keyboard(user_id))
         return
 
-    # 2. НАСТОЯЩАЯ ГЕНЕРАЦИЯ МУЛЬТФИЛЬМА / ФИЛЬМА В KLING 3.0
     if state == "waiting_cartoon_prompt":
         status_msg = bot.reply_to(message, "🧸 *Нейросеть Kling 3.0 генерирует сцену по вашему сюжету... Подождите 1-2 минуты.*", parse_mode="Markdown")
         
-        video_url, error = run_kling_generation(text)
+        video_url = run_kling_generation(text)
         
         if video_url:
             update_credits(user_id, -1)
@@ -546,12 +558,15 @@ def handle_all_text_messages(message):
                 parse_mode="Markdown"
             )
         else:
-            bot.edit_message_text(f"❌ {error}", message.chat.id, status_msg.message_id)
+            bot.edit_message_text(
+                "😔 Сервер генерации сейчас сильно загружен. Пожалуйста, попробуйте еще раз через пару минут!", 
+                message.chat.id, 
+                status_msg.message_id
+            )
             
         user_state[user_id] = {}
         return
 
-    # 3. Генерация сценария для Shorts/Reels через GPT
     status_msg = bot.reply_to(message, "⏳ *ИИ анализирует тренды и пишет сценарий...*", parse_mode="Markdown")
     
     system_prompt = (
@@ -590,7 +605,8 @@ def handle_all_text_messages(message):
         user_state[user_id] = {}
         
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка генерации: {e}", message.chat.id, status_msg.message_id)
+        print(f"[GPT ERROR]: {e}")
+        bot.edit_message_text("❌ Ошибка при создании сценария. Попробуйте еще раз.", message.chat.id, status_msg.message_id)
 
 # =====================================================================
 # 12. ОПЛАТА ЗВЁЗДАМИ
@@ -632,3 +648,4 @@ def process_payment(message):
 # =====================================================================
 if __name__ == "__main__":
     bot.infinity_polling()
+

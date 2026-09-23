@@ -35,13 +35,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PROXYAPI_KEY = os.environ.get("PROXYAPI_KEY")
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY")
 
-# ⚠️ ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID И ID ВЛАДЕЛЬЦА (узнать в @userinfobot)
+# ⚠️ ВСТАВЬТЕ СЮДА ВАШИ TELEGRAM ID
 ADMIN_IDS = [8725167633, 1368485826]
 
 PACKAGE_PRICE_STARS = 50  # Стоимость пакета: 50 звёзд
 PACKAGE_CREDITS = 20      # Генераций в пакете
-
-MAX_PHOTOS = 5  # Максимум фото на одно видео
+MAX_PHOTOS = 5
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
 client = OpenAI(
@@ -52,11 +51,11 @@ client = OpenAI(
 user_media_data = {}
 user_state = {}
 
-# Блокировка для потокобезопасной работы с SQLite
+# Блокировка потоков для SQLite
 db_lock = threading.Lock()
 
 # =====================================================================
-# 3. БАЗА ДАННЫХ SQLITE С ПОЛНОЙ БЛОКИРОВКОЙ ПОТОКОВ
+# 3. БАЗА ДАННЫХ SQLITE (Балансы и Платежи)
 # =====================================================================
 def get_db():
     conn = sqlite3.connect("bot_database.db", timeout=60.0)
@@ -134,29 +133,65 @@ async def generate_voice_file(text, output_path):
     await communicate.save(output_path)
 
 # =====================================================================
-# 5. КЛАВИАТУРА
+# 5. ВЫЗОВ НЕЙРОСЕТИ KLING 3.0 ЧЕРЕЗ PROXYAPI (Image-to-Video и Text-to-Video)
+# =====================================================================
+def run_kling_generation(prompt, image_url=None):
+    headers = {
+        "Authorization": f"Bearer {PROXYAPI_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "kwaivgi/kling-v3.0-std",
+        "prompt": prompt,
+        "aspect_ratio": "9:16",
+        "duration": 5
+    }
+    if image_url:
+        payload["image_url"] = image_url
+
+    # Создание задачи на генерацию видео
+    response = requests.post("https://api.proxyapi.ru/v1/videos", json=payload, headers=headers)
+    data = response.json()
+    
+    task_id = data.get("id") or data.get("task_id")
+    if not task_id:
+        return None, f"Ошибка создания задачи в Kling: {data}"
+        
+    # Опрос статуса генерации (видео рассчитывается от 60 до 120 секунд)
+    for _ in range(40):
+        time.sleep(5)
+        check_res = requests.get(f"https://api.proxyapi.ru/v1/videos/{task_id}", headers=headers)
+        check_data = check_res.json()
+        
+        status = check_data.get("status")
+        if status == "succeeded" or status == "completed":
+            video_url = check_data.get("video_url") or check_data.get("url") or (check_data.get("output", {}).get("url") if isinstance(check_data.get("output"), dict) else None)
+            return video_url, None
+        elif status == "failed":
+            return None, f"Генерация Kling не удалась: {check_data.get('error', 'неизвестная ошибка')}"
+            
+    return None, "Превышено время ожидания рендера Kling 3.0."
+
+# =====================================================================
+# 6. ГЛАВНОЕ МЕНЮ РЕЖИМОВ REELSGENIE
 # =====================================================================
 def get_main_keyboard(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup = types.InlineKeyboardMarkup(row_width=1)
     credits_left = get_user_credits(user_id)
     
-    btn_video = types.InlineKeyboardButton("🎬 Создать видео из фото (до 5 шт)", callback_data="act_create_video")
-    btn1 = types.InlineKeyboardButton("🔥 Факты / Топы", callback_data="genre_facts")
-    btn2 = types.InlineKeyboardButton("💡 Экспертный / Польза", callback_data="genre_expert")
-    btn3 = types.InlineKeyboardButton("😱 Мистика / Истории", callback_data="genre_story")
-    btn4 = types.InlineKeyboardButton("💰 Деньги / Бизнес", callback_data="genre_business")
+    btn_animate = types.InlineKeyboardButton("✨ Оживить фото (Kling 3.0 AI)", callback_data="mode_animate_photo")
+    btn_cartoon = types.InlineKeyboardButton("🧸 Создать мультфильм / фильм (Kling 3.0)", callback_data="mode_cartoon")
+    btn_slideshow = types.InlineKeyboardButton("🎬 Смонтировать слайдшоу с озвучкой", callback_data="mode_slideshow")
+    btn_script = types.InlineKeyboardButton("✍️ Написать сценарий для Shorts/Reels", callback_data="mode_script")
     btn_buy = types.InlineKeyboardButton(f"⭐ Купить 20 генераций (Баланс: {credits_left})", callback_data="buy_credits")
     btn_rules = types.InlineKeyboardButton("📄 Правила использования", url="https://telegra.ph")
     
-    markup.add(btn_video)
-    markup.add(btn1, btn2)
-    markup.add(btn3, btn4)
-    markup.add(btn_buy)
-    markup.add(btn_rules)
+    markup.add(btn_animate, btn_cartoon, btn_slideshow, btn_script, btn_buy, btn_rules)
     return markup
 
 # =====================================================================
-# 6. КОМАНДЫ
+# 7. КОМАНДЫ ДЛЯ ВСЕХ И АДМИНИСТРАТОРОВ
 # =====================================================================
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -164,14 +199,17 @@ def handle_start(message):
     name = message.from_user.first_name.replace("_", " ").replace("*", "")
     credits_left = get_user_credits(user_id, message.from_user.username)
     
-    text = (
+    welcome_text = (
         f"👋 **Привет, {name}!**\n\n"
-        "Я — твой ИИ-продюсер и видеомонтажёр для **Shorts, Reels и TikTok**.\n\n"
-        "• 🎬 **Монтаж видео:** пришлите от 1 до 5 фото (можно с текстом в подписи)!\n"
-        "• ✍️ **Сценарий ИИ:** выберите тематику в меню ниже.\n\n"
+        "Добро пожаловать в **ReelsGenie** — твою мобильную нейро-видеостудию на базе **Kling 3.0**!\n\n"
+        "🎬 **Выбери режим создания контента:**\n"
+        "• ✨ **Оживить фото:** кинематографичная анимация снимка через Kling 3.0;\n"
+        "• 🧸 **Создать мультфильм / фильм:** генерация видео по твоему текстовому сюжету;\n"
+        "• 🎬 **Слайдшоу с озвучкой:** монтаж клипа из фото под голос диктора;\n"
+        "• ✍️ **Сценарий ИИ:** вирусный хук и покадровый план для соцсетей.\n\n"
         f"🎁 Твой баланс: **{credits_left} генераций**."
     )
-    bot.send_message(message.chat.id, text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+    bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
 
 @bot.message_handler(commands=['stats', 'admin'])
 def handle_admin_stats(message):
@@ -194,7 +232,7 @@ def handle_admin_stats(message):
         conn.close()
     
     stats_text = (
-        "📊 **ОТЧЕТ ПО ДОХОДАМ И БОТУ**\n\n"
+        "📊 **ОТЧЕТ ПО ДОХОДАМ REELSGENIE**\n\n"
         f"👥 Всего пользователей: **{total_users} чел.**\n"
         f"💳 Платящих клиентов: **{paying_users} чел.**\n"
         f"🛍 Успешных покупок: **{total_payments} шт.**\n\n"
@@ -217,7 +255,67 @@ def handle_add_credits(message):
     bot.reply_to(message, f"👑 **Начислено +{amount} генераций!**\nТекущий баланс: **{new_bal}**.", parse_mode="Markdown")
 
 # =====================================================================
-# 7. ПРИЁМ ФОТОГРАФИЙ
+# 8. ОБРАБОТКА НАЖАТИЙ НА КНОПКИ РЕЖИМОВ
+# =====================================================================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    user_id = call.from_user.id
+    
+    if call.data == "mode_animate_photo":
+        user_state[user_id] = {"mode": "waiting_animate_photo"}
+        bot.send_message(
+            call.message.chat.id, 
+            "✨ **Режим: Оживление фото в Kling 3.0**\n\n"
+            "Пришлите **одно фото**, которое хотите превратить в живое видео.\n"
+            "В подписи можно указать движение (например: *«камера приближается, персонаж моргает и улыбается»*).",
+            parse_mode="Markdown"
+        )
+
+    elif call.data == "mode_cartoon":
+        user_state[user_id] = {"mode": "waiting_cartoon_prompt"}
+        bot.send_message(
+            call.message.chat.id,
+            "🧸 **Режим: Генерация видео / мультфильма (Kling 3.0)**\n\n"
+            "Опишите сцену для генерации на русском или английском языке.\n"
+            "Например: *«3D-мультфильм в стиле Pixar: пушистый лисенок в очках читает светящуюся книгу в волшебном лесу»*.",
+            parse_mode="Markdown"
+        )
+
+    elif call.data == "mode_slideshow":
+        user_state[user_id] = {"mode": "waiting_slideshow"}
+        user_media_data[user_id] = {"photos": [], "caption": None}
+        bot.send_message(
+            call.message.chat.id,
+            "🎬 **Режим: Слайдшоу с озвучкой**\n\n"
+            "Отправьте от 1 до 5 фото альбомом или по одной. "
+            "Затем напишите текст для дикторской озвучки (или слово **Готово**).",
+            parse_mode="Markdown"
+        )
+
+    elif call.data == "mode_script":
+        user_state[user_id] = {"mode": "waiting_script_theme"}
+        bot.send_message(
+            call.message.chat.id,
+            "✍️ **Режим: Сценарий для Shorts/Reels**\n\n"
+            "Напишите тему ролика (например: *«3 ошибки в бизнесе»*). ИИ составит хук, текст и покадровый план.",
+            parse_mode="Markdown"
+        )
+        
+    elif call.data == "buy_credits":
+        prices = [types.LabeledPrice(label="20 генераций ReelsGenie", amount=PACKAGE_PRICE_STARS)]
+        bot.send_invoice(
+            chat_id=call.message.chat.id,
+            title="Пакет: 20 генераций ReelsGenie",
+            description="Пополнение баланса на 20 видео или сценариев.",
+            invoice_payload="credits_pack_20_stars",
+            provider_token="",
+            currency="XTR",
+            prices=prices,
+            start_parameter="buy-reelsgenie-stars"
+        )
+
+# =====================================================================
+# 9. ПРИЁМ ФОТОГРАФИЙ (ОЖИВЛЕНИЕ В KLING 3.0 ИЛИ СЛАЙДШОУ)
 # =====================================================================
 @bot.message_handler(content_types=['photo'])
 def handle_incoming_photos(message):
@@ -228,12 +326,43 @@ def handle_incoming_photos(message):
         bot.reply_to(message, "⛔ У вас закончились генерации. Пополните баланс.", reply_markup=get_main_keyboard(user_id))
         return
         
-    if user_id not in user_media_data:
-        user_media_data[user_id] = {"photos": [], "caption": None}
-        
+    state = user_state.get(user_id, {}).get("mode")
     file_info = bot.get_file(message.photo[-1].file_id)
     photo_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
     
+    # СЦЕНАРИЙ А: НАСТОЯЩЕЕ ОЖИВЛЕНИЕ ФОТО В KLING 3.0
+    if state == "waiting_animate_photo":
+        prompt_text = message.caption or "High quality, smooth realistic camera motion, cinematic lighting, 4k"
+        status_msg = bot.reply_to(message, "✨ *Нейросеть Kling 3.0 оживляет ваше фото... Пожалуйста, подождите 1-2 минуты.*", parse_mode="Markdown")
+        
+        video_url, error = run_kling_generation(prompt_text, image_url=photo_url)
+        
+        if video_url:
+            update_credits(user_id, -1)
+            new_credits = get_user_credits(user_id)
+            bot.delete_message(message.chat.id, status_msg.message_id)
+            bot.send_video(
+                message.chat.id, 
+                video_url, 
+                caption="✨ **Ваше ожившее видео от Kling 3.0 AI!**", 
+                parse_mode="Markdown"
+            )
+            bot.send_message(
+                message.chat.id, 
+                f"✅ Списана 1 генерация. Осталось: **{new_credits}**.", 
+                reply_markup=get_main_keyboard(user_id), 
+                parse_mode="Markdown"
+            )
+        else:
+            bot.edit_message_text(f"❌ {error}", message.chat.id, status_msg.message_id)
+            
+        user_state[user_id] = {}
+        return
+
+    # СЦЕНАРИЙ Б: СЛАЙДШОУ (Creatomate)
+    if user_id not in user_media_data:
+        user_media_data[user_id] = {"photos": [], "caption": None}
+        
     if len(user_media_data[user_id]["photos"]) >= MAX_PHOTOS:
         return
         
@@ -251,16 +380,14 @@ def handle_incoming_photos(message):
     )
 
 # =====================================================================
-# 8. СБОРКА ВИДЕО В CREATOMATE С ДИНАМИЧЕСКИМ РАСЧЕТОМ ВРЕМЕНИ
+# 10. СБОРКА СЛАЙДШОУ В CREATOMATE
 # =====================================================================
 def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
     voice_filename = f"voice_{user_id}_{int(time.time())}.mp3"
     
     try:
-        # 1. Синтез дикторской речи
         asyncio.run(generate_voice_file(text_script, voice_filename))
         
-        # 2. Скрытая загрузка аудио в Telegram для получения URL
         with open(voice_filename, "rb") as audio_file:
             audio_msg = bot.send_audio(chat_id, audio_file, caption="🎙 Синхронизация звука...")
             
@@ -272,11 +399,9 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
         except Exception:
             pass
             
-        # 3. Сортируем фотографии по message_id
         sorted_photos = [url for msg_id, url in sorted(photos_list, key=lambda x: x[0])]
         count_photos = len(sorted_photos)
         
-        # 4. Динамический расчёт длины слайдов
         char_count = len(text_script)
         estimated_total_duration = max(4.0, char_count / 12.0)
         duration_per_slide = round(estimated_total_duration / count_photos, 2)
@@ -308,7 +433,6 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 ]
             })
             
-        # Добавляем аудиодорожку на всю длину
         elements.append({
             "type": "audio",
             "track": 2,
@@ -352,7 +476,7 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
                 bot.send_video(
                     chat_id, 
                     video_url, 
-                    caption=f"🎬 **Готовое видео из {count_photos} фото с синхронной озвучкой!**", 
+                    caption=f"🎬 **Готовое видео от ReelsGenie из {count_photos} фото!**", 
                     parse_mode="Markdown"
                 )
                 bot.send_message(
@@ -375,20 +499,21 @@ def assemble_video(chat_id, user_id, photos_list, text_script, status_msg_id):
             del user_media_data[user_id]
 
 # =====================================================================
-# 9. ОБРАБОТКА ТЕКСТА
+# 11. ОБРАБОТКА ТЕКСТА (МУЛЬТФИЛЬМЫ KLING 3.0 / СЦЕНАРИИ GPT)
 # =====================================================================
 @bot.message_handler(func=lambda message: True)
 def handle_all_text_messages(message):
     user_id = message.from_user.id
     text = message.text.strip()
     credits_left = get_user_credits(user_id)
+    state = user_state.get(user_id, {}).get("mode")
     
+    # 1. Завершение монтажа слайдшоу
     if user_id in user_media_data and user_media_data[user_id]["photos"]:
         photos_list = user_media_data[user_id]["photos"]
-        if text.lower() == "готово":
-            script_text = user_media_data[user_id].get("caption") or "Посмотрите на эти кадры вокруг нас."
-        else:
-            script_text = text
+        script_text = user_media_data[user_id].get("caption") if text.lower() == "готово" else text
+        if not script_text:
+            script_text = "Посмотрите на эти удивительные кадры вокруг нас."
             
         status_msg = bot.reply_to(message, f"🎬 *Монтируем видео из {len(photos_list)} фото с озвучкой...*", parse_mode="Markdown")
         assemble_video(message.chat.id, user_id, photos_list, script_text, status_msg.message_id)
@@ -397,10 +522,36 @@ def handle_all_text_messages(message):
     if credits_left <= 0:
         bot.reply_to(message, "⛔ **Баланс исчерпан.** Пополните баланс звёздами ниже.", reply_markup=get_main_keyboard(user_id))
         return
+
+    # 2. НАСТОЯЩАЯ ГЕНЕРАЦИЯ МУЛЬТФИЛЬМА / ФИЛЬМА В KLING 3.0
+    if state == "waiting_cartoon_prompt":
+        status_msg = bot.reply_to(message, "🧸 *Нейросеть Kling 3.0 генерирует сцену по вашему сюжету... Подождите 1-2 минуты.*", parse_mode="Markdown")
         
-    state = user_state.get(user_id, {})
-    genre = state.get("genre", "произвольный")
-    
+        video_url, error = run_kling_generation(text)
+        
+        if video_url:
+            update_credits(user_id, -1)
+            new_credits = get_user_credits(user_id)
+            bot.delete_message(message.chat.id, status_msg.message_id)
+            bot.send_video(
+                message.chat.id, 
+                video_url, 
+                caption=f"🎬 **Ваш ролик от Kling 3.0 AI!**\nСюжет: _{text}_", 
+                parse_mode="Markdown"
+            )
+            bot.send_message(
+                message.chat.id, 
+                f"✅ Списана 1 генерация. Осталось: **{new_credits}**.", 
+                reply_markup=get_main_keyboard(user_id), 
+                parse_mode="Markdown"
+            )
+        else:
+            bot.edit_message_text(f"❌ {error}", message.chat.id, status_msg.message_id)
+            
+        user_state[user_id] = {}
+        return
+
+    # 3. Генерация сценария для Shorts/Reels через GPT
     status_msg = bot.reply_to(message, "⏳ *ИИ анализирует тренды и пишет сценарий...*", parse_mode="Markdown")
     
     system_prompt = (
@@ -419,7 +570,7 @@ def handle_all_text_messages(message):
             model="openai/gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Жанр: {genre}. Тема: {text}"}
+                {"role": "user", "content": f"Тема ролика: {text}"}
             ],
             temperature=0.7
         )
@@ -442,37 +593,8 @@ def handle_all_text_messages(message):
         bot.edit_message_text(f"❌ Ошибка генерации: {e}", message.chat.id, status_msg.message_id)
 
 # =====================================================================
-# 10. КНОПКИ И ЗВЁЗДЫ
+# 12. ОПЛАТА ЗВЁЗДАМИ
 # =====================================================================
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    user_id = call.from_user.id
-    
-    if call.data == "act_create_video":
-        bot.send_message(
-            call.message.chat.id, 
-            "📸 **Отправьте от 1 до 5 фотографий!**\n"
-            "Вы можете прислать их альбомом или по одной. После этого напишите текст для диктора.", 
-            parse_mode="Markdown"
-        )
-    elif call.data.startswith("genre_"):
-        genre = call.data.replace("genre_", "")
-        user_state[user_id] = {"stage": "waiting_theme", "genre": genre}
-        bot.send_message(call.message.chat.id, "✍️ **Напишите тему для сценария:**", parse_mode="Markdown")
-        
-    elif call.data == "buy_credits":
-        prices = [types.LabeledPrice(label="20 генераций Shorts/Reels", amount=PACKAGE_PRICE_STARS)]
-        bot.send_invoice(
-            chat_id=call.message.chat.id,
-            title="Пакет: 20 генераций",
-            description="Пополнение баланса на 20 видео или сценариев с промптами.",
-            invoice_payload="credits_pack_20_stars",
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            start_parameter="buy-shorts-stars"
-        )
-
 @bot.pre_checkout_query_handler(func=lambda q: True)
 def process_pre_checkout(q):
     bot.answer_pre_checkout_query(q.id, ok=True)
@@ -494,7 +616,7 @@ def process_payment(message):
     )
     
     notify_text = (
-        "💸 **НОВАЯ ОПЛАТА В БОТЕ!**\n\n"
+        "💸 **НОВАЯ ОПЛАТА В REELSGENIE!**\n\n"
         f"👤 Покупатель: @{username} (ID: `{user_id}`)\n"
         f"⭐ Сумма: **+{stars_amount} Stars**\n"
         f"📦 Пакет: 20 генераций"
@@ -506,7 +628,7 @@ def process_payment(message):
             pass
 
 # =====================================================================
-# 11. ЗАПУСК БОТА
+# 13. ЗАПУСК БОТА
 # =====================================================================
 if __name__ == "__main__":
     bot.infinity_polling()
